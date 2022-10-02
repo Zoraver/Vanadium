@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zoraver Kang <Zoraver@users.noreply.github.com>
+Date: Wed, 30 Aug 2023 23:24:53 -0400
+Subject: [PATCH] use external ruleset holder package to update filters out of
+ band
+
+This is closely modeled after the approach used by GrapheneOS GmsCompat,
+with some code being directly reused.
+---
+ chrome/android/chrome_ext_java_sources.gni    |  2 +
+ .../init/ProcessInitializationHandler.java    | 14 ++++
+ .../subresource_filter/RulesetExtractor.java  | 74 +++++++++++++++++++
+ .../RulesetUpdateReceiver.java                | 31 ++++++++
+ 4 files changed, 121 insertions(+)
+ create mode 100644 chrome/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetExtractor.java
+ create mode 100644 chrome/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdateReceiver.java
+
+diff --git a/chrome/android/chrome_ext_java_sources.gni b/chrome/android/chrome_ext_java_sources.gni
+index 241733715338e..b645cdef318a9 100644
+--- a/chrome/android/chrome_ext_java_sources.gni
++++ b/chrome/android/chrome_ext_java_sources.gni
+@@ -12,4 +12,6 @@ chrome_ext_java_sources = [
+   "java/src/org/chromium/chrome/browser/referrer/settings/CrossOriginReferrerPolicyPreference.java",
+   "java/src/org/chromium/chrome/browser/referrer/settings/CrossOriginReferrerPolicySettings.java",
+   "java/src/org/chromium/chrome/browser/referrer/settings/CrossOriginReferrerPolicyUtils.java",
++  "java/src/org/chromium/chrome/browser/subresource_filter/RulesetExtractor.java",
++  "java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdateReceiver.java",
+ ]
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/init/ProcessInitializationHandler.java b/chrome/android/java/src/org/chromium/chrome/browser/init/ProcessInitializationHandler.java
+index d41e6477dd28c..2f4c527695d84 100644
+--- a/chrome/android/java/src/org/chromium/chrome/browser/init/ProcessInitializationHandler.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/init/ProcessInitializationHandler.java
+@@ -80,6 +80,8 @@ import org.chromium.chrome.browser.quickactionsearchwidget.QuickActionSearchWidg
+ import org.chromium.chrome.browser.rlz.RevenueStats;
+ import org.chromium.chrome.browser.searchwidget.SearchWidgetProvider;
+ import org.chromium.chrome.browser.signin.SigninCheckerProvider;
++import org.chromium.chrome.browser.subresource_filter.RulesetExtractor;
++import org.chromium.chrome.browser.subresource_filter.RulesetUpdateReceiver;
+ import org.chromium.chrome.browser.tab.state.PersistedTabData;
+ import org.chromium.chrome.browser.tab.state.ShoppingPersistedTabData;
+ import org.chromium.chrome.browser.tabpersistence.TabStateFileManager;
+@@ -517,6 +519,18 @@ public class ProcessInitializationHandler {
+         // Asynchronously query system accessibility state so it is ready for clients.
+         deferredStartupHandler.addDeferredTask(AccessibilityState::initializeOnStartup);
+         deferredStartupHandler.addDeferredTask(TabStateFileManager::onDeferredStartup);
++
++        deferredStartupHandler.addDeferredTask(() -> {
++            final Context context = ContextUtils.getApplicationContext();
++
++            // Ensure that the ruleset gets updated even if the ruleset holder gets updated when
++            // the application is not running.
++            // RulesetService::IndexAndStoreAndPublishRulesetIfNeeded() checks that the version of
++            // the ruleset has changed before it attempts to actually perform the update.
++            RulesetExtractor.parseAndUpdateRuleset(context,
++                    RulesetUpdateReceiver.RULESET_HOLDER_PACKAGE);
++            new RulesetUpdateReceiver(context);
++        });
+     }
+ 
+     private void initChannelsAsync() {
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetExtractor.java b/chrome/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetExtractor.java
+new file mode 100644
+index 0000000000000..4c66a1f0b206f
+--- /dev/null
++++ b/chrome/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetExtractor.java
+@@ -0,0 +1,74 @@
++package org.chromium.chrome.browser.subresource_filter;
++
++import android.content.Context;
++import android.content.pm.ApplicationInfo;
++import android.content.pm.PackageInfo;
++import android.content.pm.PackageManager;
++import android.util.Log;
++
++import org.chromium.chrome.browser.subresource_filter.RulesetUpdater;
++
++import java.io.File;
++import java.io.FileNotFoundException;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.io.IOException;
++import java.util.zip.ZipEntry;
++import java.util.zip.ZipFile;
++
++public class RulesetExtractor {
++    private static final String TAG = "subresource_filter.RulesetExtractor";
++
++    public static void parseAndUpdateRuleset(Context context, String pkg) {
++        final String filterFilename = "subresource_filters_unindexed";
++
++        ApplicationInfo appInfo;
++        PackageInfo pkgInfo;
++        try {
++            final PackageManager pm = context.getPackageManager();
++	    appInfo = pm.getApplicationInfo(pkg, PackageManager.ApplicationInfoFlags.of(0));
++            pkgInfo = pm.getPackageInfo(pkg, PackageManager.PackageInfoFlags.of(0));
++        } catch (PackageManager.NameNotFoundException e) {
++            Log.d(TAG, e.toString());
++
++            // The package isn't installed, don't attempt to update the ruleset.
++            return;
++        }
++        final String path = appInfo.publicSourceDir;
++        final String version = Long.toString(pkgInfo.getLongVersionCode());
++
++        if (version.equals(RulesetUpdater.version())) {
++            Log.d(TAG, String.format("Ruleset version %s already present, not updating!", version));
++            return;
++        }
++
++        // External cache directory is used to aid with debugging. In production, the internal
++        // cache directory would be more appropriate.
++        final File filterFile = new File(context.getExternalCacheDir(), filterFilename);
++        try {
++            // filterFile is not deleted immediately after RulesetUpdater.update() is called since
++            // RulesetService::IndexAndStoreAndPublishRulesetIfNeeded() may not operate on the
++            // ruleset immediately, depending on the initialization state of the RulesetService.
++            // Thus, the filterFile is left in the cache and cleaned up during the next update.
++            if (filterFile.exists()) {
++                filterFile.delete();
++            }
++
++            if (filterFile.createNewFile()) {
++                try (final ZipFile f = new ZipFile(path)) {
++                    final ZipEntry entry = f.getEntry(filterFilename);
++                    try (final InputStream rawStream = f.getInputStream(entry);
++                         final FileOutputStream out = new FileOutputStream(filterFile)) {
++                        rawStream.transferTo(out);
++                    } catch (FileNotFoundException e) {
++                        Log.d(TAG, e.toString());
++                        return;
++                    }
++                    RulesetUpdater.update(filterFile.getCanonicalPath(), version);
++                }
++            }
++        } catch (IOException e) {
++            Log.d(TAG, e.toString());
++        }
++    }
++}
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdateReceiver.java b/chrome/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdateReceiver.java
+new file mode 100644
+index 0000000000000..80b608216874b
+--- /dev/null
++++ b/chrome/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdateReceiver.java
+@@ -0,0 +1,31 @@
++// Based on GrapheneOS gmscompat ConfigUpdateReceiver
++
++package org.chromium.chrome.browser.subresource_filter;
++
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++import android.content.IntentFilter;
++import android.util.Log;
++
++import static android.os.PatternMatcher.PATTERN_LITERAL;
++
++public class RulesetUpdateReceiver extends BroadcastReceiver {
++    public static final String RULESET_HOLDER_PACKAGE = "app.vanadium.config";
++
++    public RulesetUpdateReceiver(Context context) {
++	final IntentFilter filter = new IntentFilter(Intent.ACTION_PACKAGE_REPLACED);
++	filter.addDataScheme("package");
++	filter.addDataSchemeSpecificPart(RULESET_HOLDER_PACKAGE, PATTERN_LITERAL);
++        // For debugging while the ruleset holder is not guaranteed to be installed
++        filter.addAction(Intent.ACTION_PACKAGE_ADDED);
++
++	context.registerReceiver(this, filter);
++    }
++
++    @Override
++    public void onReceive(Context context, Intent intent) {
++	Log.d("RulesetUpdateReceiver", "" + intent + " | uri: " + intent.getData());
++        RulesetExtractor.parseAndUpdateRuleset(context, RULESET_HOLDER_PACKAGE);
++    }
++}

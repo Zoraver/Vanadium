@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zoraver Kang <Zoraver@users.noreply.github.com>
+Date: Wed, 4 Oct 2023 22:57:15 -0400
+Subject: [PATCH] JNI bind RulesetService.GetMostRecentlyIndexedVersion()
+
+---
+ .../browser/subresource_filter/RulesetUpdater.java    |  5 +++++
+ .../subresource_filter/android/ruleset_updater.cc     | 11 +++++++++++
+ 2 files changed, 16 insertions(+)
+
+diff --git a/chrome/browser/subresource_filter/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdater.java b/chrome/browser/subresource_filter/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdater.java
+index 0057d820587cd..c1b2599430d10 100644
+--- a/chrome/browser/subresource_filter/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdater.java
++++ b/chrome/browser/subresource_filter/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdater.java
+@@ -12,8 +12,13 @@ public class RulesetUpdater {
+         RulesetUpdaterJni.get().update(unindexedRulesetPath, unindexedContentVersion);
+     }
+ 
++    public static String version() {
++        return RulesetUpdaterJni.get().version();
++    }
++
+     @NativeMethods
+     interface Natives {
+         void update(String unindexedRulesetPath, String unindexedContentVersion);
++        String version();
+     }
+ }
+diff --git a/chrome/browser/subresource_filter/android/ruleset_updater.cc b/chrome/browser/subresource_filter/android/ruleset_updater.cc
+index 50246ddf9ceca..c598b1e46bbde 100644
+--- a/chrome/browser/subresource_filter/android/ruleset_updater.cc
++++ b/chrome/browser/subresource_filter/android/ruleset_updater.cc
+@@ -8,7 +8,9 @@
+ #include "components/subresource_filter/content/browser/ruleset_version.h"
+ 
+ using base::android::ConvertJavaStringToUTF8;
++using base::android::ConvertUTF8ToJavaString;
+ using base::android::JavaParamRef;
++using base::android::ScopedJavaLocalRef;
+ 
+ namespace subresource_filter {
+ 
+@@ -34,4 +36,13 @@ static void JNI_RulesetUpdater_Update(JNIEnv *env,
+   }
+ }
+ 
++static ScopedJavaLocalRef<jstring> JNI_RulesetUpdater_Version(JNIEnv *env) {
++  RulesetService *ruleset_service =
++      g_browser_process->subresource_filter_ruleset_service();
++  if (!ruleset_service) return ScopedJavaLocalRef<jstring>(nullptr);
++
++  return ConvertUTF8ToJavaString(env,
++      ruleset_service->GetMostRecentlyIndexedVersion().content_version);
++}
++
+ } // namespace subresource_filter

@@ -1,0 +1,149 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zoraver Kang <Zoraver@users.noreply.github.com>
+Date: Mon, 26 Sep 2022 23:43:14 -0400
+Subject: [PATCH] JNI bind
+ RulesetService.IndexAndStoreAndPublishRulesetIfNeeded()
+
+---
+ chrome/android/BUILD.gn                       |  1 +
+ chrome/browser/BUILD.gn                       |  1 +
+ .../subresource_filter/android/BUILD.gn       | 34 +++++++++++++++++
+ .../subresource_filter/RulesetUpdater.java    | 19 ++++++++++
+ .../android/ruleset_updater.cc                | 37 +++++++++++++++++++
+ 5 files changed, 92 insertions(+)
+ create mode 100644 chrome/browser/subresource_filter/android/BUILD.gn
+ create mode 100644 chrome/browser/subresource_filter/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdater.java
+ create mode 100644 chrome/browser/subresource_filter/android/ruleset_updater.cc
+
+diff --git a/chrome/android/BUILD.gn b/chrome/android/BUILD.gn
+index b85c663c9a714..320cecb77b768 100644
+--- a/chrome/android/BUILD.gn
++++ b/chrome/android/BUILD.gn
+@@ -417,6 +417,7 @@ if (current_toolchain == default_toolchain) {
+       "//chrome/browser/share:java",
+       "//chrome/browser/share/android:java_resources",
+       "//chrome/browser/signin/services/android:java",
++      "//chrome/browser/subresource_filter/android:java",
+       "//chrome/browser/sync/android:java",
+       "//chrome/browser/tab:java",
+       "//chrome/browser/tab_group:java",
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index d18e8c3ec8661..155b5db859248 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -3496,6 +3496,7 @@ static_library("browser") {
+       "//chrome/browser/safety_check/android",
+       "//chrome/browser/search_resumption:jni_headers",
+       "//chrome/browser/signin/services/android:jni_headers",
++      "//chrome/browser/subresource_filter/android",
+       "//chrome/browser/sync/android:jni_headers",
+       "//chrome/browser/tab:jni_headers",
+       "//chrome/browser/touch_to_fill/autofill/android:public",
+diff --git a/chrome/browser/subresource_filter/android/BUILD.gn b/chrome/browser/subresource_filter/android/BUILD.gn
+new file mode 100644
+index 0000000000000..826dbaa2393a1
+--- /dev/null
++++ b/chrome/browser/subresource_filter/android/BUILD.gn
+@@ -0,0 +1,34 @@
++# Copyright 2023 Zoraver Kang
++
++import("//build/config/android/rules.gni")
++import("//third_party/jni_zero/jni_zero.gni")
++
++generate_jni("jni_headers") {
++  sources = [
++    "java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdater.java",
++  ]
++}
++
++android_library("java") {
++  srcjar_deps = [ ":jni_headers" ]
++  sources = [
++    "java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdater.java",
++  ]
++
++  deps = [
++    ":jni_headers",
++    "//base:base_java",
++    "//third_party/jni_zero:jni_zero_java",
++  ]
++}
++
++source_set("android") {
++  sources = [
++    "ruleset_updater.cc",
++  ]
++  deps = [
++    ":jni_headers",
++    "//base",
++    "//components/subresource_filter/content/browser",
++  ]
++}
+diff --git a/chrome/browser/subresource_filter/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdater.java b/chrome/browser/subresource_filter/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdater.java
+new file mode 100644
+index 0000000000000..0057d820587cd
+--- /dev/null
++++ b/chrome/browser/subresource_filter/android/java/src/org/chromium/chrome/browser/subresource_filter/RulesetUpdater.java
+@@ -0,0 +1,19 @@
++// Copyright 2022-2023 Zoraver Kang
++
++package org.chromium.chrome.browser.subresource_filter;
++
++import org.jni_zero.JNINamespace;
++import org.jni_zero.NativeMethods;
++
++@JNINamespace("subresource_filter")
++public class RulesetUpdater {
++
++    public static void update(String unindexedRulesetPath, String unindexedContentVersion) {
++        RulesetUpdaterJni.get().update(unindexedRulesetPath, unindexedContentVersion);
++    }
++
++    @NativeMethods
++    interface Natives {
++        void update(String unindexedRulesetPath, String unindexedContentVersion);
++    }
++}
+diff --git a/chrome/browser/subresource_filter/android/ruleset_updater.cc b/chrome/browser/subresource_filter/android/ruleset_updater.cc
+new file mode 100644
+index 0000000000000..50246ddf9ceca
+--- /dev/null
++++ b/chrome/browser/subresource_filter/android/ruleset_updater.cc
+@@ -0,0 +1,37 @@
++// Copyright 2022-2023 Zoraver Kang
++
++#include "base/android/jni_android.h"
++#include "base/android/jni_string.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/subresource_filter/android/jni_headers/RulesetUpdater_jni.h"
++#include "components/subresource_filter/content/browser/ruleset_service.h"
++#include "components/subresource_filter/content/browser/ruleset_version.h"
++
++using base::android::ConvertJavaStringToUTF8;
++using base::android::JavaParamRef;
++
++namespace subresource_filter {
++
++static void JNI_RulesetUpdater_Update(JNIEnv *env,
++    const JavaParamRef<jstring>& junindexed_ruleset_path,
++    const JavaParamRef<jstring>& junindexed_content_version) {
++  const std::string unindexed_ruleset_path =
++      ConvertJavaStringToUTF8(env, junindexed_ruleset_path);
++  const std::string unindexed_content_version =
++      ConvertJavaStringToUTF8(env, junindexed_content_version);
++
++  UnindexedRulesetInfo ruleset_info;
++  ruleset_info.content_version = unindexed_content_version;
++  // We know that unindexed_ruleset_path is UTF8 since it is the output of
++  // ConvertJavaStringToUTF8().
++  ruleset_info.ruleset_path =
++      base::FilePath::FromUTF8Unsafe(unindexed_ruleset_path);
++
++  RulesetService *ruleset_service =
++      g_browser_process->subresource_filter_ruleset_service();
++  if (ruleset_service) {
++    ruleset_service->IndexAndStoreAndPublishRulesetIfNeeded(ruleset_info);
++  }
++}
++
++} // namespace subresource_filter
