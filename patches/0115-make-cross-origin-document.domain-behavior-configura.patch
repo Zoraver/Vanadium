@@ -1,0 +1,289 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zoraver Kang <Zoraver@users.noreply.github.com>
+Date: Wed, 9 Aug 2023 22:05:43 -0400
+Subject: [PATCH] make cross-origin document.domain behavior configurable
+
+---
+ chrome/browser/renderer_preferences_util.cc   |  3 ++
+ chrome/browser/ui/prefs/pref_watcher.cc       |  2 ++
+ .../renderer_preferences_mojom_traits.cc      |  1 +
+ .../renderer_preferences.h                    |  2 ++
+ .../renderer_preferences_mojom_traits.h       |  5 ++++
+ .../public/mojom/renderer_preferences.mojom   |  4 +++
+ .../blink/renderer/core/dom/document.cc       | 28 +++++++++++++++++--
+ .../renderer/core/frame/local_frame_client.h  |  3 ++
+ .../core/frame/local_frame_client_impl.cc     |  6 ++++
+ .../core/frame/local_frame_client_impl.h      |  1 +
+ .../renderer/core/loader/document_loader.cc   |  9 ++++++
+ .../renderer/core/loader/document_loader.h    |  2 ++
+ .../renderer/core/loader/empty_clients.h      |  3 ++
+ 13 files changed, 67 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/renderer_preferences_util.cc b/chrome/browser/renderer_preferences_util.cc
+index 8a832415700e8..36e595709e72a 100644
+--- a/chrome/browser/renderer_preferences_util.cc
++++ b/chrome/browser/renderer_preferences_util.cc
+@@ -108,6 +108,9 @@ void UpdateFromSystemSettings(blink::RendererPreferences* prefs,
+   prefs->accept_languages = GetLanguageListForProfile(
+       profile, pref_service->GetString(language::prefs::kAcceptLanguages));
+   prefs->enable_referrers = pref_service->GetBoolean(prefs::kEnableReferrers);
++  prefs->cross_origin_referrer_policy =
++      static_cast<network::mojom::CrossOriginReferrerPolicy>(
++          pref_service->GetInteger(prefs::kCrossOriginReferrerPolicy));
+   prefs->enable_do_not_track =
+       pref_service->GetBoolean(prefs::kEnableDoNotTrack);
+   prefs->enable_encrypted_media =
+diff --git a/chrome/browser/ui/prefs/pref_watcher.cc b/chrome/browser/ui/prefs/pref_watcher.cc
+index 56b578beb7d49..9fbbedd10d545 100644
+--- a/chrome/browser/ui/prefs/pref_watcher.cc
++++ b/chrome/browser/ui/prefs/pref_watcher.cc
+@@ -84,6 +84,8 @@ PrefWatcher::PrefWatcher(Profile* profile) : profile_(profile) {
+                                      renderer_callback);
+   profile_pref_change_registrar_.Add(prefs::kEnableReferrers,
+                                      renderer_callback);
++  profile_pref_change_registrar_.Add(prefs::kCrossOriginReferrerPolicy,
++                                     renderer_callback);
+   profile_pref_change_registrar_.Add(prefs::kEnableEncryptedMedia,
+                                      renderer_callback);
+   profile_pref_change_registrar_.Add(prefs::kWebRTCIPHandlingPolicy,
+diff --git a/third_party/blink/common/renderer_preferences/renderer_preferences_mojom_traits.cc b/third_party/blink/common/renderer_preferences/renderer_preferences_mojom_traits.cc
+index 66f99b12ba32b..1a910ebc352c9 100644
+--- a/third_party/blink/common/renderer_preferences/renderer_preferences_mojom_traits.cc
++++ b/third_party/blink/common/renderer_preferences/renderer_preferences_mojom_traits.cc
+@@ -42,6 +42,7 @@ bool StructTraits<blink::mojom::RendererPreferencesDataView,
+ 
+   out->use_custom_colors = data.use_custom_colors();
+   out->enable_referrers = data.enable_referrers();
++  out->cross_origin_referrer_policy = data.cross_origin_referrer_policy();
+   out->allow_cross_origin_auth_prompt = data.allow_cross_origin_auth_prompt();
+   out->enable_do_not_track = data.enable_do_not_track();
+   out->enable_encrypted_media = data.enable_encrypted_media();
+diff --git a/third_party/blink/public/common/renderer_preferences/renderer_preferences.h b/third_party/blink/public/common/renderer_preferences/renderer_preferences.h
+index ecda061e4a22b..ef7ab28573239 100644
+--- a/third_party/blink/public/common/renderer_preferences/renderer_preferences.h
++++ b/third_party/blink/public/common/renderer_preferences/renderer_preferences.h
+@@ -12,6 +12,7 @@
+ 
+ #include "base/time/time.h"
+ #include "build/build_config.h"
++#include "services/network/public/mojom/network_context.mojom-shared.h"
+ #include "third_party/abseil-cpp/absl/types/optional.h"
+ #include "third_party/blink/public/common/common_export.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+@@ -53,6 +54,7 @@ struct BLINK_COMMON_EXPORT RendererPreferences {
+   absl::optional<base::TimeDelta> caret_blink_interval;
+   bool use_custom_colors{true};
+   bool enable_referrers{true};
++  network::mojom::CrossOriginReferrerPolicy cross_origin_referrer_policy;
+   bool allow_cross_origin_auth_prompt{false};
+   bool enable_do_not_track{false};
+   bool enable_encrypted_media{true};
+diff --git a/third_party/blink/public/common/renderer_preferences/renderer_preferences_mojom_traits.h b/third_party/blink/public/common/renderer_preferences/renderer_preferences_mojom_traits.h
+index 8bbeee8821c39..488254d319810 100644
+--- a/third_party/blink/public/common/renderer_preferences/renderer_preferences_mojom_traits.h
++++ b/third_party/blink/public/common/renderer_preferences/renderer_preferences_mojom_traits.h
+@@ -107,6 +107,11 @@ struct BLINK_COMMON_EXPORT
+     return data.enable_referrers;
+   }
+ 
++  static const network::mojom::CrossOriginReferrerPolicy&
++      cross_origin_referrer_policy(const ::blink::RendererPreferences& data) {
++    return data.cross_origin_referrer_policy;
++  }
++
+   static const bool& allow_cross_origin_auth_prompt(
+       const ::blink::RendererPreferences& data) {
+     return data.allow_cross_origin_auth_prompt;
+diff --git a/third_party/blink/public/mojom/renderer_preferences.mojom b/third_party/blink/public/mojom/renderer_preferences.mojom
+index 271672f8a7a0b..642f3c3ba3a3e 100644
+--- a/third_party/blink/public/mojom/renderer_preferences.mojom
++++ b/third_party/blink/public/mojom/renderer_preferences.mojom
+@@ -6,6 +6,7 @@ module blink.mojom;
+ 
+ import "mojo/public/mojom/base/string16.mojom";
+ import "mojo/public/mojom/base/time.mojom";
++import "services/network/public/mojom/network_context.mojom";
+ import "ui/gfx/mojom/font_render_params.mojom";
+ import "third_party/blink/public/mojom/user_agent/user_agent_metadata.mojom";
+ 
+@@ -70,6 +71,9 @@ struct RendererPreferences {
+   // Set to false to not send referrers.
+   bool enable_referrers = true;
+ 
++  // Configures what referrers are sent cross-origin
++  network.mojom.CrossOriginReferrerPolicy cross_origin_referrer_policy;
++
+   // Set to true to allow third-party sub-content to pop-up HTTP basic auth
+   // dialog boxes.
+   bool allow_cross_origin_auth_prompt = false;
+diff --git a/third_party/blink/renderer/core/dom/document.cc b/third_party/blink/renderer/core/dom/document.cc
+index 5e47f5d8e6e59..f7e442a2230ea 100644
+--- a/third_party/blink/renderer/core/dom/document.cc
++++ b/third_party/blink/renderer/core/dom/document.cc
+@@ -55,6 +55,7 @@
+ #include "services/metrics/public/cpp/ukm_recorder.h"
+ #include "services/metrics/public/cpp/ukm_source_id.h"
+ #include "services/network/public/cpp/web_sandbox_flags.h"
++#include "services/network/public/mojom/network_context.mojom-shared.h"
+ #include "services/network/public/mojom/trust_tokens.mojom-blink.h"
+ #include "services/network/public/mojom/web_sandbox_flags.mojom-blink.h"
+ #include "third_party/abseil-cpp/absl/types/optional.h"
+@@ -356,6 +357,7 @@
+ #include "third_party/blink/renderer/platform/text/platform_locale.h"
+ #include "third_party/blink/renderer/platform/theme/web_theme_engine_helper.h"
+ #include "third_party/blink/renderer/platform/web_test_support.h"
++#include "third_party/blink/renderer/platform/weborigin/kurl.h"
+ #include "third_party/blink/renderer/platform/weborigin/origin_access_entry.h"
+ #include "third_party/blink/renderer/platform/weborigin/scheme_registry.h"
+ #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+@@ -5960,8 +5962,30 @@ void Document::SetCookieManager(
+ }
+ 
+ const AtomicString& Document::referrer() const {
+-  if (Loader())
+-    return Loader()->GetReferrer();
++  if (Loader()) {
++    // Enforce cross-origin referrer policy
++    const AtomicString& referrer = Loader()->GetReferrer();
++    KURL referrerUrl = KURL(referrer.GetString());
++    switch (domWindow()->GetFrame()->Client()->CrossOriginReferrerPolicy()) {
++      case network::mojom::CrossOriginReferrerPolicy::kDefault: {
++        return referrer;
++      }
++      case network::mojom::CrossOriginReferrerPolicy::kReduce: {
++        if (!SecurityOrigin::AreSameOrigin(Loader()->Url(), referrerUrl)) {
++          return Loader()->GetReferrerReduced();
++        } else {
++          return referrer;
++        }
++      }
++      case network::mojom::CrossOriginReferrerPolicy::kDisable: {
++        if (!SecurityOrigin::AreSameOrigin(Loader()->Url(), referrerUrl)) {
++          return g_null_atom;
++	} else {
++          return referrer;
++	}
++      }
++    }
++  }
+   return g_null_atom;
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/local_frame_client.h b/third_party/blink/renderer/core/frame/local_frame_client.h
+index 62e611ec3ac95..0df5589875868 100644
+--- a/third_party/blink/renderer/core/frame/local_frame_client.h
++++ b/third_party/blink/renderer/core/frame/local_frame_client.h
+@@ -37,6 +37,7 @@
+ #include "mojo/public/cpp/bindings/pending_associated_remote.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "services/network/public/mojom/content_security_policy.mojom-blink-forward.h"
++#include "services/network/public/mojom/network_context.mojom-shared.h"
+ #include "services/network/public/mojom/web_sandbox_flags.mojom-blink-forward.h"
+ #include "third_party/abseil-cpp/absl/types/optional.h"
+ #include "third_party/blink/public/common/loader/loading_behavior_flag.h"
+@@ -261,6 +262,8 @@ class CORE_EXPORT LocalFrameClient : public FrameClient {
+ 
+   virtual String DoNotTrackValue() = 0;
+ 
++  virtual network::mojom::CrossOriginReferrerPolicy CrossOriginReferrerPolicy() = 0;
++
+   virtual void TransitionToCommittedForNewPage() = 0;
+ 
+   virtual LocalFrame* CreateFrame(const AtomicString& name,
+diff --git a/third_party/blink/renderer/core/frame/local_frame_client_impl.cc b/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
+index dbf7fd73a855f..c5292b757908a 100644
+--- a/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
++++ b/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
+@@ -857,6 +857,12 @@ String LocalFrameClientImpl::DoNotTrackValue() {
+   return String();
+ }
+ 
++network::mojom::CrossOriginReferrerPolicy
++    LocalFrameClientImpl::CrossOriginReferrerPolicy() {
++  return web_frame_->View()->GetRendererPreferences()
++      .cross_origin_referrer_policy;
++}
++
+ // Called when the FrameLoader goes into a state in which a new page load
+ // will occur.
+ void LocalFrameClientImpl::TransitionToCommittedForNewPage() {
+diff --git a/third_party/blink/renderer/core/frame/local_frame_client_impl.h b/third_party/blink/renderer/core/frame/local_frame_client_impl.h
+index 28e1c00e05e74..0e3bf4caccac7 100644
+--- a/third_party/blink/renderer/core/frame/local_frame_client_impl.h
++++ b/third_party/blink/renderer/core/frame/local_frame_client_impl.h
+@@ -176,6 +176,7 @@ class CORE_EXPORT LocalFrameClientImpl final : public LocalFrameClient {
+   WTF::String UserAgent() override;
+   absl::optional<blink::UserAgentMetadata> UserAgentMetadata() override;
+   WTF::String DoNotTrackValue() override;
++  network::mojom::CrossOriginReferrerPolicy CrossOriginReferrerPolicy() override;
+   void TransitionToCommittedForNewPage() override;
+   LocalFrame* CreateFrame(const WTF::AtomicString& name,
+                           HTMLFrameOwnerElement*) override;
+diff --git a/third_party/blink/renderer/core/loader/document_loader.cc b/third_party/blink/renderer/core/loader/document_loader.cc
+index 0062a38167824..891b13d5d0cea 100644
+--- a/third_party/blink/renderer/core/loader/document_loader.cc
++++ b/third_party/blink/renderer/core/loader/document_loader.cc
+@@ -235,6 +235,7 @@ struct SameSizeAsDocumentLoader
+   KURL original_url;
+   AtomicString http_method;
+   AtomicString referrer;
++  AtomicString referrer_reduced;
+   scoped_refptr<EncodedFormData> http_body;
+   AtomicString http_content_type;
+   scoped_refptr<const SecurityOrigin> requestor_origin;
+@@ -450,6 +451,10 @@ DocumentLoader::DocumentLoader(
+       original_url_(params_->url),
+       http_method_(static_cast<String>(params_->http_method)),
+       referrer_(static_cast<String>(params_->referrer)),
++      referrer_reduced_(referrer_ != Referrer::NoReferrer() ?
++          String(SecurityOrigin::Create(KURL(referrer_.GetString()))
++              ->ToUrlOrigin().GetURL().spec()) :
++          Referrer::NoReferrer()),
+       http_body_(params_->http_body),
+       http_content_type_(static_cast<String>(params_->http_content_type)),
+       requestor_origin_(params_->requestor_origin),
+@@ -727,6 +732,10 @@ const AtomicString& DocumentLoader::GetReferrer() const {
+   return referrer_;
+ }
+ 
++const AtomicString& DocumentLoader::GetReferrerReduced() const {
++  return referrer_reduced_;
++}
++
+ const SecurityOrigin* DocumentLoader::GetRequestorOrigin() const {
+   return requestor_origin_.get();
+ }
+diff --git a/third_party/blink/renderer/core/loader/document_loader.h b/third_party/blink/renderer/core/loader/document_loader.h
+index cafb9062a2ecb..6ad8d7a0b2430 100644
+--- a/third_party/blink/renderer/core/loader/document_loader.h
++++ b/third_party/blink/renderer/core/loader/document_loader.h
+@@ -221,6 +221,7 @@ class CORE_EXPORT DocumentLoader : public GarbageCollected<DocumentLoader>,
+ 
+   const KURL& UrlForHistory() const;
+   const AtomicString& GetReferrer() const;
++  const AtomicString& GetReferrerReduced() const;
+   const SecurityOrigin* GetRequestorOrigin() const;
+   const KURL& UnreachableURL() const;
+   const absl::optional<blink::mojom::FetchCacheMode>& ForceFetchCacheMode()
+@@ -626,6 +627,7 @@ class CORE_EXPORT DocumentLoader : public GarbageCollected<DocumentLoader>,
+   AtomicString http_method_;
+   // The referrer on the final request for this document.
+   AtomicString referrer_;
++  AtomicString referrer_reduced_;
+   scoped_refptr<EncodedFormData> http_body_;
+   AtomicString http_content_type_;
+   const scoped_refptr<const SecurityOrigin> requestor_origin_;
+diff --git a/third_party/blink/renderer/core/loader/empty_clients.h b/third_party/blink/renderer/core/loader/empty_clients.h
+index 1934ca82e3e26..2b6c775d49d0b 100644
+--- a/third_party/blink/renderer/core/loader/empty_clients.h
++++ b/third_party/blink/renderer/core/loader/empty_clients.h
+@@ -357,6 +357,9 @@ class CORE_EXPORT EmptyLocalFrameClient : public LocalFrameClient {
+ 
+   String DoNotTrackValue() override { return String(); }
+ 
++  network::mojom::CrossOriginReferrerPolicy CrossOriginReferrerPolicy()
++      override { return network::mojom::CrossOriginReferrerPolicy::kDefault; }
++
+   void TransitionToCommittedForNewPage() override {}
+ 
+   bool NavigateBackForward(
